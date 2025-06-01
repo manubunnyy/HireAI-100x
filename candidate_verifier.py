@@ -25,7 +25,7 @@ def check_ollama_available():
 OLLAMA_AVAILABLE = check_ollama_available()
 
 class CandidateVerifier:
-    def __init__(self, groq_api_key: str = None, use_local_llm: bool = False, ollama_model: str = "llama3.1:8b"):
+    def __init__(self, groq_api_key: str = None, use_local_llm: bool = False, ollama_model: str = "llama3.1:8b", github_token: str = None):
         """
         Initialize the candidate verifier
         
@@ -33,15 +33,53 @@ class CandidateVerifier:
             groq_api_key: Groq API key for cloud-based LLM
             use_local_llm: Whether to use local Ollama model
             ollama_model: Ollama model name (default: llama3.1:8b)
+            github_token: GitHub personal access token for API authentication
         """
         self.groq_api_key = groq_api_key
         self.use_local_llm = use_local_llm and OLLAMA_AVAILABLE
         self.ollama_model = ollama_model
+        self.github_token = github_token
+        
+        # Initialize GitHub API headers
+        self.github_headers = {
+            "Accept": "application/vnd.github.v3+json",
+            "Authorization": f"Bearer {github_token}" if github_token else None
+        }
+        
+        # Initialize cache
+        self.github_cache = {}
+        self.cache_expiry = 3600  # 1 hour cache expiry
         
         if self.use_local_llm and not OLLAMA_AVAILABLE:
             st.warning("Ollama is not running. Please start Ollama with: `ollama serve`")
             self.use_local_llm = False
     
+    def _get_cached_github_data(self, key: str) -> Optional[Dict[str, Any]]:
+        """Get cached GitHub data if available and not expired"""
+        if key in self.github_cache:
+            cache_entry = self.github_cache[key]
+            if time.time() - cache_entry["timestamp"] < self.cache_expiry:
+                return cache_entry["data"]
+        return None
+
+    def _cache_github_data(self, key: str, data: Dict[str, Any]):
+        """Cache GitHub data with timestamp"""
+        self.github_cache[key] = {
+            "data": data,
+            "timestamp": time.time()
+        }
+
+    def _handle_github_rate_limit(self, response: requests.Response) -> bool:
+        """Handle GitHub API rate limit response"""
+        if response.status_code == 403 and "rate limit" in response.text.lower():
+            reset_time = int(response.headers.get("X-RateLimit-Reset", 0))
+            if reset_time:
+                wait_time = reset_time - int(time.time())
+                if wait_time > 0:
+                    st.warning(f"GitHub API rate limit reached. Please wait {wait_time} seconds or use a GitHub token.")
+                    return True
+        return False
+
     def extract_emails_from_text(self, text: str) -> List[str]:
         """
         Extract email addresses from text
@@ -176,7 +214,7 @@ class CandidateVerifier:
                 username = path_parts[0]
                 # Verify the user exists
                 test_url = f"https://api.github.com/users/{username}"
-                response = requests.get(test_url, headers={"Accept": "application/vnd.github.v3+json"})
+                response = requests.get(test_url, headers=self.github_headers)
                 if response.status_code == 200:
                     return True, username
             
@@ -206,11 +244,9 @@ class CandidateVerifier:
         try:
             # Search by email if provided
             if email:
-                # Basic GitHub search (without authentication)
+                # Use authenticated GitHub search
                 search_url = f"https://api.github.com/search/users?q={quote_plus(email)}+in:email"
-                headers = {"Accept": "application/vnd.github.v3+json"}
-                
-                response = requests.get(search_url, headers=headers)
+                response = requests.get(search_url, headers=self.github_headers)
                 if response.status_code == 200:
                     data = response.json()
                     if data.get("total_count", 0) > 0:
@@ -221,9 +257,7 @@ class CandidateVerifier:
             name_parts = name.split()
             search_query = "+".join(name_parts)
             search_url = f"https://api.github.com/search/users?q={search_query}+in:name"
-            headers = {"Accept": "application/vnd.github.v3+json"}
-            
-            response = requests.get(search_url, headers=headers)
+            response = requests.get(search_url, headers=self.github_headers)
             if response.status_code == 200:
                 data = response.json()
                 if data.get("total_count", 0) > 0:
@@ -241,59 +275,63 @@ class CandidateVerifier:
         try:
             user_url = f"https://api.github.com/users/{username}"
             repos_url = f"https://api.github.com/users/{username}/repos"
-            headers = {"Accept": "application/vnd.github.v3+json"}
             
             # Get user info
-            user_response = requests.get(user_url, headers=headers)
+            user_response = requests.get(user_url, headers=self.github_headers)
             if user_response.status_code != 200:
                 return {"found": False, "platform": "GitHub"}
             
             user_data = user_response.json()
             
             # Get repositories
-            repos_response = requests.get(repos_url, headers=headers)
+            repos_response = requests.get(repos_url, headers=self.github_headers)
             repos_data = repos_response.json() if repos_response.status_code == 200 else []
             
-            # Extract relevant information
+            # Process repositories
+            repos = []
+            languages = {}
+            
+            for repo in repos_data:
+                repo_data = {
+                    "name": repo["name"],
+                    "description": repo["description"] or "",
+                    "language": repo["language"] if repo["language"] else "",
+                    "stars": repo["stargazers_count"],
+                    "forks": repo["forks_count"],
+                    "url": repo["html_url"]
+                }
+                repos.append(repo_data)
+                
+                # Track languages
+                if repo["language"]:
+                    languages[repo["language"]] = languages.get(repo["language"], 0) + 1
+            
+            # Sort repos by stars
+            repos.sort(key=lambda x: x["stars"], reverse=True)
+            
+            # Create profile data
             profile = {
                 "found": True,
                 "platform": "GitHub",
                 "username": username,
-                "name": user_data.get("name", ""),
-                "bio": user_data.get("bio", ""),
-                "location": user_data.get("location", ""),
-                "company": user_data.get("company", ""),
-                "blog": user_data.get("blog", ""),
-                "email": user_data.get("email", ""),
-                "public_repos": user_data.get("public_repos", 0),
-                "followers": user_data.get("followers", 0),
-                "following": user_data.get("following", 0),
-                "created_at": user_data.get("created_at", ""),
-                "profile_url": user_data.get("html_url", ""),
-                "avatar_url": user_data.get("avatar_url", ""),
-                "repos": []
+                "name": user_data["name"] or username,
+                "bio": user_data["bio"] or "",
+                "location": user_data["location"] or "",
+                "company": user_data["company"] or "",
+                "blog": user_data["blog"] or "",
+                "email": user_data["email"] or "",
+                "public_repos": len(repos),
+                "followers": user_data["followers"],
+                "following": user_data["following"],
+                "created_at": user_data["created_at"],
+                "profile_url": user_data["html_url"],
+                "avatar_url": user_data["avatar_url"],
+                "repos": repos,
+                "languages": languages
             }
             
-            # Add top repositories (sorted by stars)
-            if repos_data:
-                sorted_repos = sorted(repos_data, key=lambda x: x.get("stargazers_count", 0), reverse=True)[:5]
-                for repo in sorted_repos:
-                    profile["repos"].append({
-                        "name": repo.get("name", ""),
-                        "description": repo.get("description", ""),
-                        "language": repo.get("language", ""),
-                        "stars": repo.get("stargazers_count", 0),
-                        "forks": repo.get("forks_count", 0),
-                        "url": repo.get("html_url", "")
-                    })
-            
-            # Calculate programming languages used
-            languages = {}
-            for repo in repos_data:
-                lang = repo.get("language")
-                if lang:
-                    languages[lang] = languages.get(lang, 0) + 1
-            profile["languages"] = languages
+            # Cache the result
+            self._cache_github_data(f"user_{username}", profile)
             
             return profile
             

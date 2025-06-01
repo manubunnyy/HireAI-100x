@@ -95,6 +95,9 @@ GROQ_API_KEYS = [
     # "your_third_api_key"
 ]
 
+# GitHub API token for higher rate limits
+GITHUB_TOKEN = "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"  # GitHub personal access token
+
 # Remove the warning since we have hardcoded keys
 # if not GROQ_API_KEYS:
 #     st.sidebar.warning("⚠️ No Groq API keys found. Please add them to your .env file as GROQ_API_KEY_1, GROQ_API_KEY_2, etc.")
@@ -420,6 +423,10 @@ def analyze_job_description(job_description_text):
     # Convert to lowercase for consistent processing
     job_description_text = job_description_text.strip()
     
+    if not job_description_text:
+        st.error("❌ Please enter a job description")
+        return {}
+    
     prompt = f"""
     You are an expert recruiter and job analyst. Analyze this job description written in natural language and extract all relevant requirements. The description might be informal, conversational, or unstructured - your job is to understand the context and extract meaningful requirements.
     
@@ -464,10 +471,16 @@ def analyze_job_description(job_description_text):
         
         # Clean and parse the response
         json_str = response
-        if "```json" in response:
-            json_str = response.split("```json")[1].split("```")[0]
-        elif "```" in response:
-            json_str = response.split("```")[1].split("```")[0]
+        if isinstance(response, str):
+            # Try to extract JSON from markdown code blocks if present
+            json_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', response)
+            if json_match:
+                json_str = json_match.group(1)
+            else:
+                # If no code blocks, try to find JSON object
+                json_match = re.search(r'\{[\s\S]*\}', response)
+                if json_match:
+                    json_str = json_match.group(0)
         
         # Clean up the JSON string
         json_str = json_str.strip()
@@ -521,6 +534,8 @@ def analyze_job_description(job_description_text):
             
         except json.JSONDecodeError as e:
             st.error(f"Error parsing job requirements: {str(e)}")
+            st.error("Raw response from API:")
+            st.code(response)
             return {}
             
     except Exception as e:
@@ -866,7 +881,7 @@ def handle_chat_input(i, resume_info, candidate_id):
 def process_resume_batch(batch, resume_data, job_requirements):
     """Process a batch of resumes concurrently."""
     results = []
-    verifier = SilentCandidateVerifier()  # Use silent verifier to suppress verbose output
+    verifier = SilentCandidateVerifier(github_token=GITHUB_TOKEN)  # Pass GitHub token
     
     for result in batch:
         try:
@@ -882,7 +897,7 @@ def process_resume_batch(batch, resume_data, job_requirements):
             
             try:
                 # Initialize custom verifier with minimal output
-                custom_verifier = SilentCandidateVerifier()
+                custom_verifier = SilentCandidateVerifier(github_token=GITHUB_TOKEN)  # Pass GitHub token
                 
                 # Call verification with suppressed output
                 verification_result = custom_verifier.verify_candidate_with_urls(
@@ -937,37 +952,37 @@ def process_resume_batch(batch, resume_data, job_requirements):
     
     return results
 
-# Function to call Ollama API for chatbot
-def call_ollama_api(prompt, model="llama3.1:8b", max_retries=3):
-    """
-    Call the Ollama API for chatbot functionality.
-    """
-    import requests
+# Function to call Ollama API for chatbot - REMOVED in favor of Groq API
+# def call_ollama_api(prompt, model="llama3.1:8b", max_retries=3):
+#     """
+#     Call the Ollama API for chatbot functionality.
+#     """
+#     import requests
     
-    for attempt in range(max_retries):
-        try:
-            response = requests.post(
-                "http://localhost:11434/api/generate",
-                json={
-                    "model": model,
-                    "prompt": prompt,
-                    "stream": False
-                },
-                timeout=30
-            )
-            response.raise_for_status()
-            return response.json().get("response", "")
-        except requests.exceptions.RequestException as e:
-            if attempt == max_retries - 1:
-                return f"Error connecting to Ollama: {str(e)}"
-            time.sleep(2)  # Wait before retry
+#     for attempt in range(max_retries):
+#         try:
+#             response = requests.post(
+#                 "http://localhost:11434/api/generate",
+#                 json={
+#                     "model": model,
+#                     "prompt": prompt,
+#                     "stream": False
+#                 },
+#                 timeout=30
+#             )
+#             response.raise_for_status()
+#             return response.json().get("response", "")
+#         except requests.exceptions.RequestException as e:
+#             if attempt == max_retries - 1:
+#                 return f"Error connecting to Ollama: {str(e)}"
+#             time.sleep(2)  # Wait before retry
     
-    return "Error: Could not connect to Ollama after multiple attempts"
+#     return "Error: Could not connect to Ollama after multiple attempts"
 
-# Modified function to generate chat response using Ollama
+# Remove Ollama API function and replace with Groq API for chat
 def generate_chat_response(user_input: str, context: Dict[str, Any]) -> str:
     """
-    Generate a response to a user's question about a candidate using Ollama with comprehensive context.
+    Generate a response to a user's question about a candidate using Groq API with comprehensive context.
     """
     
     # Extract all candidate information
@@ -1072,6 +1087,8 @@ def generate_chat_response(user_input: str, context: Dict[str, Any]) -> str:
     # GitHub profile information
     github_data = profiles.get('github', {})
     if github_data and github_data.get('found'):
+        print("\n=== DEBUG: GitHub Data ===")
+        print(f"GitHub Data: {json.dumps(github_data, indent=2)}")
         context_parts.append("\n=== GITHUB PROFILE ===")
         if github_data.get('profile_url'):
             context_parts.append(f"GitHub URL: {github_data['profile_url']}")
@@ -1090,64 +1107,136 @@ def generate_chat_response(user_input: str, context: Dict[str, Any]) -> str:
         if github_data.get('blog'):
             context_parts.append(f"Website/Blog: {github_data['blog']}")
         if github_data.get("repositories"):
-            context_parts.append("Notable Repositories:")
+            print("\n=== DEBUG: GitHub Repositories ===")
+            print(f"Repositories: {json.dumps(github_data['repositories'], indent=2)}")
+            context_parts.append("\nNotable Repositories:")
             repos = github_data.get("repositories", [])
             if isinstance(repos, list):
-                for repo in repos[:5]:
+                for repo in repos[:3]:  # Show only top 3 repositories
                     if isinstance(repo, dict):
-                        repo_info = f"  - {repo.get('name', 'Unknown')}: {repo.get('description', 'No description')}"
+                        repo_info = []
+                        if repo.get('name'):
+                            repo_info.append(f"**{repo['name']}**")
+                        if repo.get('description'):
+                            repo_info.append(f"Description: {repo['description']}")
                         if repo.get('language'):
-                            repo_info += f" (Language: {repo['language']})"
+                            repo_info.append(f"Language: {repo['language']}")
                         if repo.get('stars'):
-                            repo_info += f" (Stars: {repo['stars']})"
+                            repo_info.append(f"Stars: {repo['stars']}")
                         if repo.get('forks'):
-                            repo_info += f" (Forks: {repo['forks']})"
-                        context_parts.append(repo_info)
+                            repo_info.append(f"Forks: {repo['forks']}")
+                        if repo.get('url'):
+                            repo_info.append(f"URL: {repo['url']}")
+                        context_parts.append("• " + " | ".join(repo_info))
                     else:
-                        context_parts.append(f"  - {repo}")
+                        context_parts.append(f"• {repo}")
         if github_data.get('contributions'):
             context_parts.append(f"Contributions: {github_data['contributions']}")
         if github_data.get('languages'):
             context_parts.append(f"Programming Languages Used: {', '.join(github_data['languages'])}")
     
+        context_parts.append("---")
+    
     # LinkedIn profile information
     linkedin_data = profiles.get('linkedin', {})
     if linkedin_data and linkedin_data.get('found'):
+        print("\n=== DEBUG: LinkedIn Data ===")
+        print(f"LinkedIn Data: {json.dumps(linkedin_data, indent=2)}")
         context_parts.append("\n=== LINKEDIN PROFILE ===")
         if linkedin_data.get('verified_urls'):
             urls = linkedin_data['verified_urls']
             if isinstance(urls, list) and urls:
                 context_parts.append(f"LinkedIn URL: {urls[0]}")
+                linkedin_url = urls[0]
+                username = linkedin_url.split('/')[-1]  # Extract username from URL
+                
+                # LinkedIn recent activity API call
+                try:
+                    print("\n=== DEBUG: LinkedIn Recent Activity API Call ===")
+                    activity_url = "https://linkedin-data-api.p.rapidapi.com/profiles/recent-activity/all"
+                    activity_payload = {
+                        "username": username,
+                        "page": 1,
+                        "limit": 1  # Get only 1 most recent activity
+                    }
+                    activity_headers = {
+                        "x-rapidapi-key": "512175d384mshb7894ebd80ddda4p11a2c4jsn7fbc012751c2",
+                        "x-rapidapi-host": "linkedin-data-api.p.rapidapi.com",
+                        "Content-Type": "application/json"
+                    }
+                    
+                    print(f"Making request to: {activity_url}")
+                    print(f"With payload: {json.dumps(activity_payload, indent=2)}")
+                    
+                    activity_response = requests.post(
+                        activity_url,
+                        json=activity_payload,
+                        headers=activity_headers
+                    )
+                    
+                    print(f"Response status code: {activity_response.status_code}")
+                    print(f"Response content: {activity_response.text}")
+                    
+                    if activity_response.status_code == 200:
+                        activity_data = activity_response.json()
+                        if activity_data and isinstance(activity_data, dict):
+                            context_parts.append("\nRecent Activity:")
+                            if 'activities' in activity_data and activity_data['activities']:
+                                activity = activity_data['activities'][0]  # Get the first activity
+                                with st.container():
+                                    st.markdown("---")
+                                    activity_type = activity.get('type', 'Unknown')
+                                    activity_date = activity.get('date', 'Unknown date')
+                                    activity_text = activity.get('text', 'No text available')
+                                    activity_likes = activity.get('likes', 0)
+                                    activity_comments = activity.get('comments', 0)
+                                    
+                                    # Display activity type with appropriate emoji
+                                    activity_emoji = {
+                                        'post': '📝',
+                                        'article': '📰',
+                                        'comment': '💬',
+                                        'like': '👍',
+                                        'share': '🔄',
+                                        'job': '💼',
+                                        'connection': '🤝',
+                                        'certification': '🏆',
+                                        'default': '📌'
+                                    }.get(activity_type.lower(), '📌')
+                                    
+                                    st.markdown(f"{activity_emoji} **{activity_type.title()}** on {activity_date}")
+                                    st.markdown(f"{activity_text[:200]}..." if len(activity_text) > 200 else activity_text)
+                                    
+                                    # Show engagement metrics if available
+                                    if activity_likes > 0 or activity_comments > 0:
+                                        st.markdown(f"👍 {activity_likes} likes | 💬 {activity_comments} comments")
+                                    
+                                    # Show additional activity details if available
+                                    if activity.get('company'):
+                                        st.markdown(f"🏢 Company: {activity['company']}")
+                                    if activity.get('title'):
+                                        st.markdown(f"📋 Title: {activity['title']}")
+                                    if activity.get('url'):
+                                        st.markdown(f"[View Activity]({activity['url']})")
+                except Exception as e:
+                    print(f"Error in recent activity API call: {str(e)}")
+                    context_parts.append(f"Note: Could not fetch recent activity: {str(e)}")
             elif isinstance(urls, str):
                 context_parts.append(f"LinkedIn URL: {urls}")
-        if linkedin_data.get('headline'):
-            context_parts.append(f"Professional Headline: {linkedin_data['headline']}")
-        if linkedin_data.get('summary'):
-            context_parts.append(f"Summary: {linkedin_data['summary']}")
-        if linkedin_data.get('location'):
-            context_parts.append(f"Location: {linkedin_data['location']}")
-        if linkedin_data.get('industry'):
-            context_parts.append(f"Industry: {linkedin_data['industry']}")
-        if linkedin_data.get('connections'):
-            context_parts.append(f"Connections: {linkedin_data['connections']}")
-        if linkedin_data.get('scraped_data'):
-            scraped_linkedin = linkedin_data['scraped_data']
-            if isinstance(scraped_linkedin, list) and scraped_linkedin:
-                for data in scraped_linkedin:
-                    if data.get('experience'):
-                        context_parts.append("LinkedIn Experience:")
-                        for exp in data['experience'][:5]:
-                            context_parts.append(f"  - {exp}")
-                    if data.get('education'):
-                        context_parts.append("LinkedIn Education:")
-                        for edu in data['education']:
-                            context_parts.append(f"  - {edu}")
-                    if data.get('skills'):
-                        context_parts.append(f"LinkedIn Skills: {', '.join(data['skills'])}")
-                    if data.get('certifications'):
-                        context_parts.append("LinkedIn Certifications:")
-                        for cert in data['certifications']:
-                            context_parts.append(f"  - {cert}")
+    
+    # Add LinkedIn profile details
+    if linkedin_data.get('headline'):
+        context_parts.append(f"Headline: {linkedin_data['headline']}")
+    if linkedin_data.get('summary'):
+        context_parts.append(f"Summary: {linkedin_data['summary']}")
+    if linkedin_data.get('location'):
+        context_parts.append(f"Location: {linkedin_data['location']}")
+    if linkedin_data.get('industry'):
+        context_parts.append(f"Industry: {linkedin_data['industry']}")
+    if linkedin_data.get('connections'):
+        context_parts.append(f"Connections: {linkedin_data['connections']}")
+    
+    context_parts.append("---")
     
     # Other web presence
     if scraped_content:
@@ -1326,9 +1415,9 @@ INSTRUCTIONS:
 Please provide a detailed, helpful response based on all available candidate information:"""
     
     try:
-        response = call_ollama_api(prompt)
-        if response.startswith("Error"):
-            return f"I apologize, but I'm having trouble connecting to the chat service: {response}"
+        response = call_groq_api(prompt)
+        if isinstance(response, dict) and "error" in response:
+            return f"I apologize, but I'm having trouble connecting to the chat service: {response['error']}"
         return response
     except Exception as e:
         return f"I apologize, but I encountered an error: {str(e)}"
@@ -1759,8 +1848,8 @@ def main():
                     # Show selected content based on button clicks
                     if hasattr(st.session_state, 'show_chat') and st.session_state.show_chat:
                         with st.expander("💬 Pre-screening Q&A", expanded=True):
-                            # Check Ollama connection first
-                            st.info("💡 Make sure Ollama is running locally with llama3.1:8b model")
+                            # Check Groq API connection
+                            st.info("💡 Using Groq API for chat responses")
                             
                             if "chat_history" not in st.session_state:
                                 st.session_state.chat_history = {}
@@ -1813,7 +1902,7 @@ def main():
                                             
                                         except Exception as e:
                                             st.error(f"Chat error: {str(e)}")
-                                            st.info("Make sure Ollama is running: `ollama serve` and `ollama run llama3.1:8b`")
+                                            st.info("Please ensure your Groq API key is properly configured")
                     
                     if hasattr(st.session_state, 'show_web_data') and st.session_state.show_web_data:
                         with st.expander("🌐 Web Presence", expanded=True):
@@ -1834,23 +1923,34 @@ def main():
                                 if github_data.get("bio"):
                                     st.markdown(f"**Bio:** {github_data['bio']}")
                         
-                                if github_data.get("public_repos"):
-                                    st.markdown("**Top Repositories:**")
+                                # Display public repositories count
+                                public_repos = github_data.get("public_repos", 0)
+                                if public_repos > 0:
+                                    st.markdown(f"**Public Repositories:** {public_repos}")
+                                
+                                if github_data.get("company"):
+                                    st.markdown(f"**Company:** {github_data['company']}")
+                                
+                                if github_data.get("location"):
+                                    st.markdown(f"**Location:** {github_data['location']}")
+                                
+                                if github_data.get("blog"):
+                                    st.markdown(f"**Website/Blog:** {github_data['blog']}")
+                                
+                                # Display repositories in a more prominent way
+                                if github_data.get("repositories"):
+                                    st.markdown("\n### 📚 Repositories")
                                     repos = github_data.get("repositories", [])
-                                    if isinstance(repos, list):
-                                        for repo in repos[:5]:
+                                    if isinstance(repos, list) and repos:
+                                        # Ensure at least one repository is displayed
+                                        for repo in repos[:1]:  # Show only the first repository
                                             if isinstance(repo, dict):
-                                                name = repo.get('name', 'Unknown')
-                                                url = repo.get('url', '#')
-                                                desc = repo.get('description', 'No description')
-                                                st.markdown(f"• [{name}]({url}) - {desc}")
+                                                with st.container():
+                                                    name = repo.get('name', 'Unknown')
+                                                    url = repo.get('url', '#')
+                                                    st.markdown(f"**[{name}]({url})**")
                                             else:
                                                 st.markdown(f"• {repo}")
-                                    else:
-                                        st.markdown(f"• {repos}")
-                                
-                                if github_data.get("contributions"):
-                                    st.markdown(f"**Contributions:** {github_data['contributions']}")
                                 
                                 st.markdown("---")
                             
@@ -1864,113 +1964,75 @@ def main():
                                     urls = linkedin_data["verified_urls"]
                                     if isinstance(urls, list) and urls:
                                         st.markdown(f"**Profile:** [{urls[0]}]({urls[0]})")
+                                        linkedin_url = urls[0]
+                                        username = linkedin_url.split('/')[-1]  # Extract username from URL
+                                        
+                                        # LinkedIn recent activity API call
+                                        try:
+                                            activity_url = "https://linkedin-data-api.p.rapidapi.com/profiles/recent-activity/all"
+                                            activity_payload = {
+                                                "username": username,
+                                                "page": 1,
+                                                "limit": 1  # Get only 1 most recent activity
+                                            }
+                                            activity_headers = {
+                                                "x-rapidapi-key": "512175d384mshb7894ebd80ddda4p11a2c4jsn7fbc012751c2",
+                                                "x-rapidapi-host": "linkedin-data-api.p.rapidapi.com",
+                                                "Content-Type": "application/json"
+                                            }
+                                            
+                                            activity_response = requests.post(
+                                                activity_url,
+                                                json=activity_payload,
+                                                headers=activity_headers
+                                            )
+                                            
+                                            if activity_response.status_code == 200:
+                                                activity_data = activity_response.json()
+                                                if activity_data and isinstance(activity_data, dict):
+                                                    st.markdown("\n### Recent Activity")
+                                                    if 'activities' in activity_data and activity_data['activities']:
+                                                        activity = activity_data['activities'][0]  # Get the first activity
+                                                        with st.container():
+                                                            activity_type = activity.get('type', 'Unknown')
+                                                            activity_date = activity.get('date', 'Unknown date')
+                                                            activity_text = activity.get('text', 'No text available')
+                                                            activity_likes = activity.get('likes', 0)
+                                                            activity_comments = activity.get('comments', 0)
+                                                            
+                                                            # Display activity type with appropriate emoji
+                                                            activity_emoji = {
+                                                                'post': '📝',
+                                                                'article': '📰',
+                                                                'comment': '💬',
+                                                                'like': '👍',
+                                                                'share': '🔄',
+                                                                'job': '💼',
+                                                                'connection': '🤝',
+                                                                'certification': '🏆',
+                                                                'default': '📌'
+                                                            }.get(activity_type.lower(), '📌')
+                                                            
+                                                            st.markdown(f"{activity_emoji} **{activity_type.title()}** on {activity_date}")
+                                                            st.markdown(f"{activity_text[:200]}..." if len(activity_text) > 200 else activity_text)
+                                                            
+                                                            # Show engagement metrics if available
+                                                            if activity_likes > 0 or activity_comments > 0:
+                                                                st.markdown(f"👍 {activity_likes} likes | 💬 {activity_comments} comments")
+                                                            
+                                                            # Show additional activity details if available
+                                                            if activity.get('company'):
+                                                                st.markdown(f"🏢 Company: {activity['company']}")
+                                                            if activity.get('title'):
+                                                                st.markdown(f"📋 Title: {activity['title']}")
+                                                            if activity.get('url'):
+                                                                st.markdown(f"[View Activity]({activity['url']})")
+                                        except Exception as e:
+                                            st.markdown(f"Note: Could not fetch recent activity: {str(e)}")
                                     elif isinstance(urls, str):
                                         st.markdown(f"**Profile:** [{urls}]({urls})")
-                        
-                                if linkedin_data.get("headline"):
-                                    st.markdown(f"**Headline:** {linkedin_data['headline']}")
                                 
-                                if linkedin_data.get("summary"):
-                                    st.markdown(f"**Summary:** {linkedin_data['summary']}")
-                                
-                                if linkedin_data.get("scraped_data"):
-                                    scraped_linkedin = linkedin_data["scraped_data"]
-                                    if isinstance(scraped_linkedin, list) and scraped_linkedin:
-                                        for data in scraped_linkedin:
-                                            if data.get("experience"):
-                                                st.markdown("**Experience:**")
-                                                for exp in data["experience"][:3]:
-                                                    st.markdown(f"• {exp}")
-                                            if data.get("education"):
-                                                st.markdown("**Education:**")
-                                                for edu in data["education"]:
-                                                    st.markdown(f"• {edu}")
-                                
-                            st.markdown("---")
-                    
-                            # Other web presence from scraped content
-                            scraped_content = selected_result.get("scraped_content", {})
-                            if scraped_content:
-                                has_data = True
-                                st.markdown("#### 🌐 Other Web Presence")
-                                
-                                for url, content in scraped_content.items():
-                                    if content and isinstance(content, dict) and content.get("success"):
-                                        platform = content.get('platform', 'Website')
-                                        title = content.get('title', url)
-                                        
-                                        st.markdown(f"**🔗 [{platform}]({url})**")
-                                        
-                                        if content.get("title") and content["title"] != url:
-                                            st.markdown(f"*Title:* {content['title']}")
-                                        
-                                        if content.get("description"):
-                                            st.markdown(f"*Description:* {content['description']}")
-                                        
-                                        if content.get("skills"):
-                                            skills = content['skills']
-                                            if isinstance(skills, list):
-                                                skills_text = ', '.join(skills)
-                                            else:
-                                                skills_text = str(skills)
-                                            st.markdown(f"*Skills Found:* {skills_text}")
-                                        
-                                        if content.get("technologies"):
-                                            tech = content['technologies']
-                                            if isinstance(tech, list):
-                                                tech_text = ', '.join(tech)
-                                            else:
-                                                tech_text = str(tech)
-                                            st.markdown(f"*Technologies:* {tech_text}")
-                                        
-                                        st.markdown("---")
-                            
-                            # Verification summary
-                            if verification_result and not verification_result.get("error"):
-                                has_data = True
-                                st.markdown("#### ✅ Verification Summary")
-                                
-                                # Calculate authenticity score
-                                auth_score = 0
-                                if verification_result.get("authenticity_score"):
-                                    auth_score = verification_result["authenticity_score"]
-                                elif verification_result.get("profiles"):
-                                    # Calculate based on profiles found
-                                    profiles = verification_result["profiles"]
-                                    score = 0
-                                    if profiles.get("github", {}).get("found"):
-                                        score += 50
-                                    if profiles.get("linkedin", {}).get("found"):
-                                        score += 50
-                                    auth_score = score
-                                
-                                st.markdown(f"**Authenticity Score:** {auth_score}/100")
-                                st.progress(auth_score / 100)
-                                
-                                # Email verification
-                                resume_info = selected_result.get("resume_info", {})
-                                if resume_info.get("domain_reputation"):
-                                    st.markdown(f"**Domain Reputation:** {resume_info.get('domain_reputation', 'Unknown')}")
-                                
-                                # Summary of profiles found
-                                profiles_summary = []
-                                if github_data and github_data.get("found"):
-                                    profiles_summary.append("GitHub")
-                                if linkedin_data and linkedin_data.get("found"):
-                                    profiles_summary.append("LinkedIn")
-                                if scraped_content:
-                                    profiles_summary.append(f"{len(scraped_content)} other sites")
-                                
-                                if profiles_summary:
-                                    st.markdown(f"**Profiles Found:** {', '.join(profiles_summary)}")
-                            
-                            # Show message if no data found
-                            if not has_data:
-                                st.info("🔍 No web presence data found for this candidate. This could mean:")
-                                st.markdown("• No social media profiles linked in resume")
-                                st.markdown("• Profiles are private or not accessible")
-                                st.markdown("• Verification process encountered limitations")
-                                st.markdown("• Candidate may prefer to keep online presence minimal")
+                                st.markdown("---")
             
             # Bulk email functionality
             if hasattr(st.session_state, 'show_bulk_email') and st.session_state.show_bulk_email:
